@@ -1,133 +1,78 @@
 package mitmdump
 
 import (
-	"fmt"
-	"io"
-	"log"
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"os"
 	"path"
-	"time"
-
-	"github.com/elazarl/goproxy"
 )
 
-type Meta struct {
-	req      *http.Request
-	resp     *http.Response
-	err      error
-	t        time.Time
-	sess     int64
-	bodyPath string
-	from     string
+// LogContext is used to save state between request and response cycles
+type LogContext struct {
+	TraceID string
+	UUID    string
 }
 
-func fprintf(nr *int64, err *error, w io.Writer, pat string, a ...interface{}) {
-	if *err != nil {
-		return
-	}
-	var n int
-	n, *err = fmt.Fprintf(w, pat, a...)
-	*nr += int64(n)
+// HTTPLogger implements RequestLogger and ResponseLogger
+type HTTPLogger struct {
+	basepath string
 }
 
-func write(nr *int64, err *error, w io.Writer, b []byte) {
-	if *err != nil {
-		return
-	}
-	var n int
-	n, *err = w.Write(b)
-	*nr += int64(n)
-}
+var errEmptyID = errors.New("empty traceID")
 
-func (m *Meta) WriteTo(w io.Writer) (nr int64, err error) {
-	if m.req != nil {
-		fprintf(&nr, &err, w, "Type: request\r\n")
-	} else if m.resp != nil {
-		fprintf(&nr, &err, w, "Type: response\r\n")
-	}
-	fprintf(&nr, &err, w, "ReceivedAt: %v\r\n", m.t)
-	fprintf(&nr, &err, w, "Session: %d\r\n", m.sess)
-	fprintf(&nr, &err, w, "From: %v\r\n", m.from)
-	if m.err != nil {
-		// note the empty response
-		fprintf(&nr, &err, w, "Error: %v\r\n\r\n\r\n\r\n", m.err)
-	} else if m.req != nil {
-		fprintf(&nr, &err, w, "\r\n")
-		buf, err2 := httputil.DumpRequest(m.req, false)
-		if err2 != nil {
-			return nr, err2
-		}
-		write(&nr, &err, w, buf)
-	} else if m.resp != nil {
-		fprintf(&nr, &err, w, "\r\n")
-		buf, err2 := httputil.DumpResponse(m.resp, false)
-		if err2 != nil {
-			return nr, err2
-		}
-		write(&nr, &err, w, buf)
-	}
-	return
-}
-
-type HttpLogger struct {
-	path  string
-	c     chan *Meta
-	errch chan error
-}
-
-func NewLogger(basepath string) (*HttpLogger, error) {
-	f, err := os.Create(path.Join(basepath, "log"))
+// NewLogger creates a HTTPLogger
+func NewLogger(basepath string) (*HTTPLogger, error) {
+	err := os.MkdirAll(basepath, 0755)
 	if err != nil {
 		return nil, err
 	}
-	logger := &HttpLogger{basepath, make(chan *Meta), make(chan error)}
-	go func() {
-		for m := range logger.c {
-			if _, err := m.WriteTo(f); err != nil {
-				log.Println("Can't write meta", err)
-			}
-		}
-		logger.errch <- f.Close()
-	}()
-	return logger, nil
+	return &HTTPLogger{basepath}, nil
 }
 
-func (logger *HttpLogger) LogResp(resp *http.Response, ctx *goproxy.ProxyCtx) {
-	body := path.Join(logger.path, fmt.Sprintf("%d_resp", ctx.Session))
-	if resp == nil {
-		resp = &http.Response{}
-	} else {
-		resp.Body = NewTeeReadCloser(resp.Body, NewFileStream(body))
+// LogReq ...
+func (logger *HTTPLogger) LogReq(req *http.Request, ctx *LogContext) error {
+	if ctx.TraceID == "" || ctx.UUID == "" {
+		return errEmptyID
 	}
-	logger.LogMeta(&Meta{
-		resp: resp,
-		err:  ctx.Error,
-		t:    time.Now(),
-		sess: ctx.Session})
-}
-
-func (logger *HttpLogger) LogReq(req *http.Request, ctx *goproxy.ProxyCtx) {
-	body := path.Join(logger.path, fmt.Sprintf("%d_req", ctx.Session))
-	if req == nil {
-		req = &http.Request{}
-	} else {
-		req.Body = NewTeeReadCloser(req.Body, NewFileStream(body))
+	dir := path.Join(logger.basepath, ctx.TraceID, ctx.UUID)
+	err := os.MkdirAll(dir, 0755)
+	if err != nil {
+		return err
 	}
-	logger.LogMeta(&Meta{
-		req:  req,
-		err:  ctx.Error,
-		t:    time.Now(),
-		sess: ctx.Session,
-		from: req.RemoteAddr})
+	resData, err := httputil.DumpRequest(req, true)
+	if err != nil {
+		return err
+	}
+	respath := path.Join(dir, "req")
+	stream, err := NewFileStream(respath)
+	stream.Write(resData)
+	stream.Close()
+	return nil
 }
 
-func (logger *HttpLogger) LogMeta(m *Meta) {
-	logger.c <- m
+// LogRes ..
+func (logger *HTTPLogger) LogRes(res *http.Response, ctx *LogContext) error {
+	if ctx.TraceID == "" || ctx.UUID == "" {
+		return errEmptyID
+	}
+	dir := path.Join(logger.basepath, ctx.TraceID, ctx.UUID)
+	err := os.MkdirAll(dir, 0755)
+	if err != nil {
+		return err
+	}
+	resData, err := httputil.DumpResponse(res, true)
+	if err != nil {
+		return err
+	}
+	respath := path.Join(dir, "res")
+	stream, err := NewFileStream(respath)
+	stream.Write(resData)
+	stream.Close()
+	return nil
 }
 
-func (logger *HttpLogger) Close() error {
-	close(logger.c)
-	return <-logger.errch
+// Close gracefully shuts down the logger
+func (logger *HTTPLogger) Close() error {
+	return nil
 }

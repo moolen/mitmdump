@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"flag"
 	"log"
 	"net"
@@ -10,8 +9,8 @@ import (
 	"os/signal"
 
 	"github.com/elazarl/goproxy"
-	"github.com/elazarl/goproxy/transport"
 	"github.com/moolen/mitmdump"
+	uuid "github.com/satori/go.uuid"
 )
 
 func main() {
@@ -20,51 +19,58 @@ func main() {
 	flag.Parse()
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = *verbose
-	if err := os.MkdirAll("db", 0755); err != nil {
-		log.Fatal("Can't create dir", err)
-	}
-	logger, err := mitmdump.NewLogger("db")
+	logger, err := mitmdump.NewLogger("/home/moritz/go/src/github.com/moolen/mitmdump/db")
 	if err != nil {
 		log.Fatal("can't open log file", err)
 	}
-	tr := transport.Transport{
-		Proxy: transport.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		}}
 
-	// yolo!
 	proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		log.Printf("doing roundtrip for: %s", req.Host)
-		ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (resp *http.Response, err error) {
-			ctx.UserData, resp, err = tr.DetailedRoundTrip(req)
-			return
-		})
-		logger.LogReq(req, ctx)
+		traceID := req.Header.Get("X-TraceId")
+		if len(traceID) == 0 {
+			log.Printf("missing X-TraceId header")
+		}
+		uid := uuid.NewV4().String()
+		logCtx := &mitmdump.LogContext{
+			TraceID: traceID,
+			UUID:    uid,
+		}
+		ctx.UserData = logCtx
+		err := logger.LogReq(req, logCtx)
+		if err != nil {
+			log.Printf("error logging req: %v", err)
+		}
 		return req, nil
 	})
 	proxy.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-		logger.LogResp(resp, ctx) // panics
+		logCtx, ok := ctx.UserData.(*mitmdump.LogContext)
+		if !ok {
+			log.Printf("missing X-TraceId header")
+		}
+		err := logger.LogRes(resp, logCtx)
+		if err != nil {
+			log.Printf("error logging res: %v", err)
+		}
 		return resp
 	})
+
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatal("listen:", err)
 	}
-	sl := mitmdump.NewGracefulListener(l)
+	lis := mitmdump.NewGracefulListener(l)
 	ch := make(chan os.Signal)
 	signal.Notify(ch, os.Interrupt)
 	go func() {
 		<-ch
 		log.Println("Got SIGINT exiting")
-		sl.Add(1)
-		sl.Close()
+		lis.Add(1)
+		lis.Close()
 		logger.Close()
-		sl.Done()
+		lis.Done()
 	}()
 	log.Println("Starting Proxy")
-	http.Serve(sl, proxy)
-	sl.Wait()
+	http.Serve(lis, proxy)
+	lis.Wait()
 	log.Println("All connections closed - exit")
 }
