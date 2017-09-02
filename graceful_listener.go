@@ -17,10 +17,12 @@ type stoppableConn struct {
 	wg *sync.WaitGroup
 }
 
+// NewGracefulListener is a factory function for a graceful listener
 func NewGracefulListener(l net.Listener) *GracefulListener {
 	return &GracefulListener{l, sync.WaitGroup{}}
 }
 
+// Accept overrides the net.Conn.Accept() interface
 func (sl *GracefulListener) Accept() (net.Conn, error) {
 	c, err := sl.Listener.Accept()
 	if err != nil {

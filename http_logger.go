@@ -10,28 +10,52 @@ import (
 
 // LogContext is used to save state between request and response cycles
 type LogContext struct {
+	// TraceID is a trace id that is used to group multiple
+	// requests and responses
 	TraceID string
-	UUID    string
+	// UUID is used to identify a single request-response cycle
+	UUID string
 }
 
-// HTTPLogger implements RequestLogger and ResponseLogger
-type HTTPLogger struct {
+// HTTPLogger can log HTTP requests or responses
+type HTTPLogger interface {
+	LogReq(req *http.Request, ctx *LogContext) error
+	LogRes(res *http.Response, ctx *LogContext) error
+}
+
+// FileHTTPLogger implements HTTPLogger and dumps
+// the request-response cycle on the file system
+// with the following structure:
+// {basepath}/{trace-id}/{req-id}/{req|res}
+type FileHTTPLogger struct {
 	basepath string
+	builder  FileStreamBuilder
 }
 
 var errEmptyID = errors.New("empty traceID")
 
-// NewLogger creates a HTTPLogger
-func NewLogger(basepath string) (*HTTPLogger, error) {
+// NewLogger creates a FileHTTPLogger that logs
+// the request-response cycle uncompressed in plaintext
+func NewLogger(basepath string) (*FileHTTPLogger, error) {
 	err := os.MkdirAll(basepath, 0755)
 	if err != nil {
 		return nil, err
 	}
-	return &HTTPLogger{basepath}, nil
+	return &FileHTTPLogger{basepath, NewFileStream}, nil
 }
 
-// LogReq ...
-func (logger *HTTPLogger) LogReq(req *http.Request, ctx *LogContext) error {
+// NewZipLogger creates a FileHTTPLogger that logs
+// the request-response cycle in gzip compressed format
+func NewZipLogger(basepath string, builder FileStreamBuilder) (*FileHTTPLogger, error) {
+	err := os.MkdirAll(basepath, 0755)
+	if err != nil {
+		return nil, err
+	}
+	return &FileHTTPLogger{basepath, NewGzipFileStream}, nil
+}
+
+// LogReq dumps the request to the filesystem
+func (logger *FileHTTPLogger) LogReq(req *http.Request, ctx *LogContext) error {
 	if ctx.TraceID == "" || ctx.UUID == "" {
 		return errEmptyID
 	}
@@ -45,14 +69,14 @@ func (logger *HTTPLogger) LogReq(req *http.Request, ctx *LogContext) error {
 		return err
 	}
 	respath := path.Join(dir, "req")
-	stream, err := NewFileStream(respath)
+	stream, err := logger.builder(respath)
 	stream.Write(resData)
 	stream.Close()
 	return nil
 }
 
-// LogRes ..
-func (logger *HTTPLogger) LogRes(res *http.Response, ctx *LogContext) error {
+// LogRes dumps the request to the filesystem
+func (logger *FileHTTPLogger) LogRes(res *http.Response, ctx *LogContext) error {
 	if ctx.TraceID == "" || ctx.UUID == "" {
 		return errEmptyID
 	}
@@ -61,18 +85,22 @@ func (logger *HTTPLogger) LogRes(res *http.Response, ctx *LogContext) error {
 	if err != nil {
 		return err
 	}
+	// res might be nil!
+	if res == nil {
+		return nil
+	}
 	resData, err := httputil.DumpResponse(res, true)
 	if err != nil {
 		return err
 	}
 	respath := path.Join(dir, "res")
-	stream, err := NewFileStream(respath)
+	stream, err := logger.builder(respath)
 	stream.Write(resData)
 	stream.Close()
 	return nil
 }
 
-// Close gracefully shuts down the logger
-func (logger *HTTPLogger) Close() error {
+// Close does some cleanup if needed
+func (logger *FileHTTPLogger) Close() error {
 	return nil
 }

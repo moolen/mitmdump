@@ -3,7 +3,6 @@ package mitmdump
 import (
 	"compress/gzip"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 )
@@ -14,7 +13,12 @@ type FileStream struct {
 	f    io.WriteCloser
 }
 
-// NewFileStream returns a new FileStream in "as-is" mode
+// The FileStreamBuilder is used as a factory
+// function in order to create a FileStream
+type FileStreamBuilder func(string) (*FileStream, error)
+
+// NewFileStream returns a FileStream that writes plain text
+// to the specified path
 func NewFileStream(path string) (*FileStream, error) {
 	file, err := os.Create(path)
 	if err != nil {
@@ -23,7 +27,8 @@ func NewFileStream(path string) (*FileStream, error) {
 	return &FileStream{path, file}, nil
 }
 
-// NewGzipFileStream returns a new FileStream in "gzip" mode
+// NewGzipFileStream returns a new FileStream that writes
+// compressed data to the specified path
 func NewGzipFileStream(path string) (*FileStream, error) {
 	file, err := os.Create(path)
 	if err != nil {
@@ -33,7 +38,7 @@ func NewGzipFileStream(path string) (*FileStream, error) {
 	return &FileStream{path, writeCloser}, nil
 }
 
-// Write implements Writer
+// implements Writer
 func (fs *FileStream) Write(b []byte) (nr int, err error) {
 	if fs.f == nil {
 		file, err := os.Create(fs.path)
@@ -47,7 +52,6 @@ func (fs *FileStream) Write(b []byte) (nr int, err error) {
 
 // Close implements Closer
 func (fs *FileStream) Close() error {
-	fmt.Println("Close", fs.path)
 	if fs.f == nil {
 		return errors.New("FileStream was never written into")
 	}
